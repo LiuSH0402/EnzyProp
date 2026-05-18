@@ -168,29 +168,6 @@ temp -> topt
 ph   -> phopt
 ```
 
-## SASA Handling
-
-If `--sasa-dir` is not provided, EnzyProp generates temporary SASA files during
-prediction and deletes them afterward.
-
-Save SASA files for reuse:
-
-```bash
-enzyprop predict --target topt --input-csv F:\path\to\test\query.csv --pdb-dir F:\path\to\test\PDB --sasa-dir F:\path\to\test\sasa_three --out-dir outputs\topt --device cpu
-```
-
-Generate SASA files only:
-
-```bash
-enzyprop sasa --input-csv F:\path\to\test\query.csv --pdb-dir F:\path\to\test\PDB --sasa-dir F:\path\to\test\sasa_three
-```
-
-Reuse existing SASA files without recalculating:
-
-```bash
-enzyprop predict --target topt --input-csv F:\path\to\test\query.csv --pdb-dir F:\path\to\test\PDB --sasa-dir F:\path\to\test\sasa_three --skip-sasa --out-dir outputs\topt --device cpu
-```
-
 ## Training
 
 Training is driven by YAML config files:
