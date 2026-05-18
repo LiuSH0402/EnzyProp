@@ -1,17 +1,54 @@
 # EnzyProp
 
-EnzyProp is a command line package for enzyme property prediction. It predicts:
+Structure-aware command-line toolkit for enzyme property prediction.
+
+<p align="center">
+  <img src="figure/workflow.jpg" alt="EnzyProp workflow" width="980">
+</p>
+
+EnzyProp predicts three enzyme properties from protein sequence and PDB
+structure files:
 
 - `topt`: optimal temperature
 - `phopt`: optimal pH
 - `pi`: isoelectric point
 
-The package takes a sequence table plus PDB structure files, calculates
-three-class SASA regions when needed, and writes compact CSV prediction results.
+The package combines sequence representations, structure-derived information,
+and three-class SASA region features, then writes compact CSV prediction
+results for downstream analysis.
 
-## Folder Layout
+## Highlights
 
-Put trained model checkpoints here:
+- Command-line interface for single-target and three-target batch prediction
+- Supports `csv`, `xlsx`, and `xls` input tables
+- Accepts a single PDB file or a folder of PDB structures
+- Automatically computes SASA features when needed
+- Includes training entrypoints driven by YAML config files
+
+## Repository Structure
+
+```text
+EnzyProp/
+├─ enzyme_predictor/   # package source code
+├─ configs/            # training config examples
+├─ test/               # small example inputs
+├─ figure/             # README figures
+├─ README.md
+├─ INSTALL.md
+├─ pyproject.toml
+├─ requirements.txt
+└─ environment.yml
+```
+
+Runtime folders used by the package:
+
+```text
+models/    # put trained checkpoints here
+hf_cache/  # HuggingFace cache for ESM2 / ProtBert
+outputs/   # prediction outputs
+```
+
+Expected checkpoint names:
 
 ```text
 models/
@@ -20,27 +57,31 @@ models/
   pi_best_model.pt
 ```
 
-HuggingFace base models for ESM2 and ProtBert are cached here by default:
+## Installation
 
-```text
-hf_cache/
+Recommended:
+
+```bash
+conda env create -f environment.yml
+conda activate web_pre
 ```
 
-For batch prediction, a typical input folder looks like this:
+Manual install:
 
-```text
-test/
-  query.csv
-  PDB/
-    Q2HWU5.pdb
-    D9I0I9.pdb
+```bash
+conda create -n web_pre python=3.10 pip -y
+conda activate web_pre
+pip install -r requirements.txt
+pip install -e .
 ```
 
-If `--sasa-dir` is not provided, SASA files are generated in a temporary folder
-and deleted after prediction. If you want to keep/reuse SASA files, pass
-`--sasa-dir path/to/sasa_three`.
+Check the CLI:
 
-## Input Table
+```bash
+enzyprop --help
+```
+
+## Input Format
 
 The input table can be `.csv`, `.xlsx`, or `.xls`.
 
@@ -63,106 +104,83 @@ Accepted sequence columns:
 sequence, seq, aa_seq
 ```
 
-Optional target columns are allowed but not required:
+Optional target columns:
 
 ```text
-topt/temp/tm/temperature
-phopt/ph/ph_value
+topt, temp, tm, temperature
+phopt, ph, ph_value
 pi
 ```
 
-## Install
+For batch prediction, a typical folder layout is:
 
-Recommended:
-
-```bash
-conda env create -f environment.yml
-conda activate web_pre
+```text
+test/
+  query.csv
+  PDB/
+    Q2HWU5.pdb
+    D9I0I9.pdb
 ```
 
-Manual install:
+## Quick Start
 
-```bash
-conda create -n web_pre python=3.10 pip -y
-conda activate web_pre
-pip install -r requirements.txt
-pip install -e .
-```
-
-Check:
-
-```bash
-enzyprop --help
-```
-
-## Predict One Target
-
-If the input CSV is next to a `PDB/` folder:
+Predict one target:
 
 ```bash
 enzyprop predict --target topt --input-csv F:\path\to\test\query.csv --out-dir outputs\topt --device cpu
 ```
 
-Predict optimal pH:
+Predict all three targets:
 
 ```bash
-enzyprop predict --target phopt --input-csv F:\path\to\test\query.csv --out-dir outputs\phopt --device cpu
+enzyprop predict-all --input-csv F:\path\to\test\query.csv --out-dir outputs\all --device cpu
 ```
 
-Predict pI:
+Predict with a single PDB file:
 
 ```bash
-enzyprop predict --target pi --input-csv F:\path\to\test\query.csv --out-dir outputs\pi --device cpu
+enzyprop predict --target pi --input-csv F:\path\to\test\one.csv --pdb-file F:\path\to\test\PDB\Q2HWU5.pdb --out-dir outputs\pi --device cpu
 ```
 
-The old target names are still accepted as aliases:
+Legacy aliases are still supported:
 
 ```text
 temp -> topt
 ph   -> phopt
 ```
 
-## Predict With One PDB File
+## SASA Handling
 
-Use this when the input table contains exactly one sequence row:
+If `--sasa-dir` is not provided, EnzyProp generates temporary SASA files during
+prediction and deletes them afterward.
 
-```bash
-enzyprop predict --target topt --input-csv F:\path\to\test\one.csv --pdb-file F:\path\to\test\PDB\Q2HWU5.pdb --out-dir outputs\topt --device cpu
-```
-
-## Predict All Three Targets
-
-Batch folder mode:
+Save SASA files for reuse:
 
 ```bash
-enzyprop predict-all --input-csv F:\path\to\test\query.csv --out-dir outputs\all --device cpu
+enzyprop predict --target topt --input-csv F:\path\to\test\query.csv --pdb-dir F:\path\to\test\PDB --sasa-dir F:\path\to\test\sasa_three --out-dir outputs\topt --device cpu
 ```
 
-Single PDB mode:
+Generate SASA files only:
 
 ```bash
-enzyprop predict-all --input-csv F:\path\to\test\one.csv --pdb-file F:\path\to\test\PDB\Q2HWU5.pdb --out-dir outputs\all --device cpu
+enzyprop sasa --input-csv F:\path\to\test\query.csv --pdb-dir F:\path\to\test\PDB --sasa-dir F:\path\to\test\sasa_three
 ```
 
-Outputs:
+Reuse existing SASA files without recalculating:
 
-```text
-outputs/all/
-  topt_result.csv
-  phopt_result.csv
-  pi_result.csv
-  all_targets_predictions.csv
+```bash
+enzyprop predict --target topt --input-csv F:\path\to\test\query.csv --pdb-dir F:\path\to\test\PDB --sasa-dir F:\path\to\test\sasa_three --skip-sasa --out-dir outputs\topt --device cpu
 ```
 
-## Train A Model
+## Training
 
-Training is available through a config file:
+Training is driven by YAML config files:
 
 ```bash
 enzyprop train --config configs/topt_train.yaml
 ```
 
-Example configs are provided:
+Example configs:
 
 ```text
 configs/
@@ -171,8 +189,7 @@ configs/
   pi_train.yaml
 ```
 
-The training config keeps data paths and hyperparameters in one place. Important
-fields are:
+Typical config fields:
 
 ```yaml
 target: topt
@@ -189,14 +206,7 @@ lr_head: 1.0e-4
 lr_backbone: 1.0e-5
 ```
 
-`sasa_dir` is not required in the training config. EnzyProp calculates
-three-class SASA files automatically and stores them under:
-
-```text
-out_dir/sasa_three/
-```
-
-Training outputs include:
+Training outputs typically include:
 
 ```text
 runs/topt/
@@ -209,35 +219,11 @@ runs/topt/
   sasa_three/
 ```
 
-The best checkpoint can be copied into `models/` and used directly by
-`enzyprop predict`.
-
-## SASA Handling
-
-By default, prediction automatically calculates missing SASA files and deletes
-temporary SASA files after prediction.
-
-Save SASA files for reuse:
-
-```bash
-enzyprop predict --target topt --input-csv F:\path\to\test\query.csv --pdb-dir F:\path\to\test\PDB --sasa-dir F:\path\to\test\sasa_three --out-dir outputs\topt --device cpu
-```
-
-Only generate SASA files:
-
-```bash
-enzyprop sasa --input-csv F:\path\to\test\query.csv --pdb-dir F:\path\to\test\PDB --sasa-dir F:\path\to\test\sasa_three
-```
-
-Skip SASA calculation and use existing files:
-
-```bash
-enzyprop predict --target topt --input-csv F:\path\to\test\query.csv --pdb-dir F:\path\to\test\PDB --sasa-dir F:\path\to\test\sasa_three --skip-sasa --out-dir outputs\topt --device cpu
-```
+The best checkpoint can then be copied into `models/` for prediction.
 
 ## Output
 
-Single-target files are:
+Single-target prediction outputs:
 
 ```text
 topt_result.csv
@@ -245,30 +231,26 @@ phopt_result.csv
 pi_result.csv
 ```
 
-For compatibility with earlier EnzyProp runs, `predict-all` can still read
-existing legacy `*_relust.csv` files when merging outputs.
-
 Each single-target CSV contains:
 
 ```text
 id,pred_mu,pred_var,lower95,upper95,uncertainty
 ```
 
-`pred_var` is the prediction variance. Internally, EnzyProp uses the predicted
-standard deviation to assign `uncertainty`:
-
-- `low`: lower uncertainty, model is more confident
-- `medium`: medium uncertainty
-- `high`: higher uncertainty, model is less confident
-
-The merged `all_targets_predictions.csv` contains target-specific prediction,
+The merged result from `predict-all` contains target-specific prediction,
 variance, confidence interval, and uncertainty columns, for example:
 
 ```text
 id,topt_pred,topt_variance,topt_lower95,topt_upper95,topt_uncertainty,...
 ```
 
-## Defaults
+Uncertainty labels:
+
+- `low`: lower uncertainty, model is more confident
+- `medium`: medium uncertainty
+- `high`: higher uncertainty, model is less confident
+
+## Default Paths
 
 If omitted, EnzyProp uses:
 
@@ -283,5 +265,9 @@ CUDA is used when available. Use `--device cpu` to force CPU inference.
 
 ## Notes
 
-CPU inference is supported, but the trained checkpoints include the GNN channel,
-so PyTorch Geometric is required even on CPU servers.
+- PyTorch Geometric is required even for CPU inference because the trained
+  checkpoints include the GNN channel.
+- Model checkpoints and HuggingFace cache files are not included in this
+  repository.
+- The `test/` folder contains small example files for quick validation.
+
