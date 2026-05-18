@@ -63,9 +63,9 @@ models/
 This repository does not include large model files.
 
 - `models/` stores the trained EnzyProp checkpoints for `topt`, `phopt`, and
-  `pi`. These checkpoint files will be released separately and downloaded
-  manually by users. See `models/README.md` for expected filenames and future
-  release notes.
+  `pi`. These checkpoint files can be downloaded from Zenodo:
+  https://zenodo.org/records/20267122
+  See `models/README.md` for expected filenames and download notes.
 - `hf_cache/` is only a local cache directory for upstream HuggingFace base
   models such as ESM2 and ProtBert. It is not part of the source repository.
   On first use, these base models can be downloaded automatically by the
@@ -161,6 +161,29 @@ Legacy aliases are still supported:
 ```text
 temp -> topt
 ph   -> phopt
+```
+
+## SASA Handling
+
+If `--sasa-dir` is not provided, EnzyProp generates temporary SASA files during
+prediction and deletes them afterward.
+
+Save SASA files for reuse:
+
+```bash
+enzyprop predict --target topt --input-csv F:\path\to\test\query.csv --pdb-dir F:\path\to\test\PDB --sasa-dir F:\path\to\test\sasa_three --out-dir outputs\topt --device cpu
+```
+
+Generate SASA files only:
+
+```bash
+enzyprop sasa --input-csv F:\path\to\test\query.csv --pdb-dir F:\path\to\test\PDB --sasa-dir F:\path\to\test\sasa_three
+```
+
+Reuse existing SASA files without recalculating:
+
+```bash
+enzyprop predict --target topt --input-csv F:\path\to\test\query.csv --pdb-dir F:\path\to\test\PDB --sasa-dir F:\path\to\test\sasa_three --skip-sasa --out-dir outputs\topt --device cpu
 ```
 
 ## Training
