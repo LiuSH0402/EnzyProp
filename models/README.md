@@ -1,12 +1,9 @@
-# EnzyProp Model Checkpoints
+# Model Checkpoints
 
-Put your trained checkpoint files here:
+Place the trained EnzyProp checkpoint files in this folder:
 
-```text
-topt_best_model.pt
-phopt_best_model.pt
-pi_best_model.pt
-```
+- `topt_best_model.pt`
+- `phopt_best_model.pt`
+- `pi_best_model.pt`
 
-The CLI resolves these names automatically when you pass `--models-dir models`.
-If `--models-dir` is omitted, EnzyProp uses this folder by default.
+Download links for these checkpoints will be added later.
