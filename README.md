@@ -57,6 +57,25 @@ models/
   pi_best_model.pt
 ```
 
+## Pretrained Weights and Base Models
+
+This repository does not include large model files.
+
+- `models/` stores the trained EnzyProp checkpoints for `topt`, `phopt`, and
+  `pi`. These checkpoint files will be released separately and downloaded
+  manually by users.
+- `hf_cache/` is only a local cache directory for upstream HuggingFace base
+  models such as ESM2 and ProtBert. It is not part of the source repository.
+  On first use, these base models can be downloaded automatically by the
+  package and cached locally.
+
+If the checkpoints are not present yet, you can keep this placeholder in the
+README for now and replace it later with your release links, for example:
+
+```text
+EnzyProp checkpoints: <to be released>
+```
+
 ## Installation
 
 Recommended:
@@ -270,4 +289,3 @@ CUDA is used when available. Use `--device cpu` to force CPU inference.
 - Model checkpoints and HuggingFace cache files are not included in this
   repository.
 - The `test/` folder contains small example files for quick validation.
-
