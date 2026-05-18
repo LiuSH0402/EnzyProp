@@ -1,0 +1,42 @@
+# Example EnzyProp training config for optimal pH.
+
+target: phopt
+train_table: ../data/phopt_train.csv
+val_table: ../data/phopt_val.csv
+test_table: ../data/phopt_test.csv
+pdb_dir: ../data/PDB
+out_dir: ../runs/phopt
+hf_cache: ../hf_cache
+
+max_seq_len: 1800
+batch_size: 4
+num_workers: 0
+use_esm2: true
+use_protbert: true
+use_gnn: true
+protbert_pool: mean
+fusion_hidden: 1024
+dropout: 0.15
+gnn_hidden: 128
+gnn_layers: 3
+gnn_k_neighbors: 20
+
+device: cuda
+epochs: 30
+freeze_epochs: 0
+patience: 7
+early_metric: rmse
+seed: 42
+use_amp: true
+grad_ckpt: true
+accum_steps: 1
+grad_clip: 1.0
+target_noise: 0.0
+
+loss_alpha_A: 0.0
+loss_alpha_B: 0.1
+lr_head: 1.0e-4
+lr_backbone: 1.0e-5
+weight_decay: 1.0e-4
+warmup_ratio: 0.02
+lr_min_factor: 0.1
