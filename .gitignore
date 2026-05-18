@@ -1,0 +1,46 @@
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Test and notebook cache
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local runtime outputs
+outputs/
+runs/
+*.log
+
+# Local model weights and archives
+models/*.pt
+models/*.pth
+models/*.ckpt
+models/*.bin
+models/*.zip
+models/*.rar
+models/*.tar
+models/*.gz
+
+# Hugging Face / transformer cache
+hf_cache/
