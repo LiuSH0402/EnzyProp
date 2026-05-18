@@ -1,0 +1,17 @@
+# EnzyProp minimal runtime dependencies.
+# Python 3.10 is recommended.
+#
+# CPU-only servers can usually install these directly with:
+#   pip install -r requirements.txt
+#
+# If you need a specific CUDA build of PyTorch, install PyTorch first from the
+# official PyTorch index, then run this file.
+
+numpy==2.1.2
+pandas==2.2.3
+openpyxl==3.1.5
+torch==2.7.0
+torch-geometric==2.7.0
+transformers==4.48.1
+freesasa==2.2.1
+PyYAML==6.0.2

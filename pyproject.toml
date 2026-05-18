@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "EnzyProp"
+version = "0.1.0"
+description = "Command line tools for EnzyProp enzyme property prediction."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy",
+  "pandas",
+  "torch",
+  "torch-geometric",
+  "transformers",
+  "freesasa",
+  "PyYAML",
+]
+
+[project.scripts]
+enzyprop = "enzyme_predictor.cli:main"
+enzyme-predictor = "enzyme_predictor.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["enzyme_predictor*"]
