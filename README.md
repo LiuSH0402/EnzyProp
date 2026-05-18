@@ -29,15 +29,16 @@ results for downstream analysis.
 
 ```text
 EnzyProp/
-├─ enzyme_predictor/   # package source code
-├─ configs/            # training config examples
-├─ test/               # small example inputs
-├─ figure/             # README figures
-├─ README.md
-├─ INSTALL.md
-├─ pyproject.toml
-├─ requirements.txt
-└─ environment.yml
+|- enzyme_predictor/   # package source code
+|- configs/            # training config examples
+|- test/               # small example inputs
+|- figure/             # README figures
+|- models/             # checkpoint placeholder / download notes
+|- README.md
+|- INSTALL.md
+|- pyproject.toml
+|- requirements.txt
+`- environment.yml
 ```
 
 Runtime folders used by the package:
@@ -63,18 +64,12 @@ This repository does not include large model files.
 
 - `models/` stores the trained EnzyProp checkpoints for `topt`, `phopt`, and
   `pi`. These checkpoint files will be released separately and downloaded
-  manually by users.
+  manually by users. See `models/README.md` for expected filenames and future
+  release notes.
 - `hf_cache/` is only a local cache directory for upstream HuggingFace base
   models such as ESM2 and ProtBert. It is not part of the source repository.
   On first use, these base models can be downloaded automatically by the
   package and cached locally.
-
-If the checkpoints are not present yet, you can keep this placeholder in the
-README for now and replace it later with your release links, for example:
-
-```text
-EnzyProp checkpoints: <to be released>
-```
 
 ## Installation
 
@@ -166,6 +161,29 @@ Legacy aliases are still supported:
 ```text
 temp -> topt
 ph   -> phopt
+```
+
+## SASA Handling
+
+If `--sasa-dir` is not provided, EnzyProp generates temporary SASA files during
+prediction and deletes them afterward.
+
+Save SASA files for reuse:
+
+```bash
+enzyprop predict --target topt --input-csv F:\path\to\test\query.csv --pdb-dir F:\path\to\test\PDB --sasa-dir F:\path\to\test\sasa_three --out-dir outputs\topt --device cpu
+```
+
+Generate SASA files only:
+
+```bash
+enzyprop sasa --input-csv F:\path\to\test\query.csv --pdb-dir F:\path\to\test\PDB --sasa-dir F:\path\to\test\sasa_three
+```
+
+Reuse existing SASA files without recalculating:
+
+```bash
+enzyprop predict --target topt --input-csv F:\path\to\test\query.csv --pdb-dir F:\path\to\test\PDB --sasa-dir F:\path\to\test\sasa_three --skip-sasa --out-dir outputs\topt --device cpu
 ```
 
 ## Training
