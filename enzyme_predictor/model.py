@@ -19,7 +19,7 @@ except ImportError:
             "Install a CPU or CUDA build that matches your PyTorch version."
         ) from exc
 
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoConfig, AutoModel, AutoTokenizer
 
 from .config import PredictorConfig
 
@@ -141,6 +141,7 @@ class MultiChannelPIPredictor(nn.Module):
         max_seq_len: Optional[int] = None,
         esm2_max_len: Optional[int] = None,
         protbert_max_len: Optional[int] = None,
+        load_pretrained_backbones: bool = True,
     ):
         super().__init__()
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -161,8 +162,20 @@ class MultiChannelPIPredictor(nn.Module):
         self.use_esm2 = use_esm2
         self.esm2_hidden = esm2_hidden
         if self.use_esm2:
-            self.esm2_tok = AutoTokenizer.from_pretrained(esm2_model, cache_dir=esm2_cache_dir)
-            self.esm2_enc = AutoModel.from_pretrained(esm2_model, cache_dir=esm2_cache_dir)
+            self.esm2_tok = AutoTokenizer.from_pretrained(
+                esm2_model,
+                cache_dir=esm2_cache_dir,
+                local_files_only=not load_pretrained_backbones,
+            )
+            if load_pretrained_backbones:
+                self.esm2_enc = AutoModel.from_pretrained(esm2_model, cache_dir=esm2_cache_dir)
+            else:
+                esm2_config = AutoConfig.from_pretrained(
+                    esm2_model,
+                    cache_dir=esm2_cache_dir,
+                    local_files_only=True,
+                )
+                self.esm2_enc = AutoModel.from_config(esm2_config)
             if not esm2_finetune:
                 for p in self.esm2_enc.parameters():
                     p.requires_grad = False
@@ -181,8 +194,17 @@ class MultiChannelPIPredictor(nn.Module):
                 protbert_model,
                 do_lower_case=False,
                 cache_dir=protbert_cache_dir,
+                local_files_only=not load_pretrained_backbones,
             )
-            self.pb_enc = AutoModel.from_pretrained(protbert_model, cache_dir=protbert_cache_dir)
+            if load_pretrained_backbones:
+                self.pb_enc = AutoModel.from_pretrained(protbert_model, cache_dir=protbert_cache_dir)
+            else:
+                protbert_config = AutoConfig.from_pretrained(
+                    protbert_model,
+                    cache_dir=protbert_cache_dir,
+                    local_files_only=True,
+                )
+                self.pb_enc = AutoModel.from_config(protbert_config)
             if not protbert_finetune:
                 for p in self.pb_enc.parameters():
                     p.requires_grad = False
@@ -408,7 +430,12 @@ class ZScoreTarget:
         self.std = state["std"].float()
 
 
-def build_model(config: PredictorConfig, device: str | torch.device) -> MultiChannelPIPredictor:
+def build_model(
+    config: PredictorConfig,
+    device: str | torch.device,
+    *,
+    load_pretrained_backbones: bool = True,
+) -> MultiChannelPIPredictor:
     return MultiChannelPIPredictor(
         d_seqfeat=config.d_seqfeat,
         use_esm2=config.use_esm2,
@@ -430,6 +457,7 @@ def build_model(config: PredictorConfig, device: str | torch.device) -> MultiCha
         dropout=config.dropout,
         device=str(device),
         max_seq_len=config.max_seq_len,
+        load_pretrained_backbones=load_pretrained_backbones,
     )
 
 
