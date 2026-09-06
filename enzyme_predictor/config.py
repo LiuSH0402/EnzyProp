@@ -14,8 +14,11 @@ class PredictorConfig:
     checkpoint_name: str
     result_filename: str
     legacy_result_filename: str | None
-    uncertainty_low_sd: float
-    uncertainty_high_sd: float
+    # Validation-derived predictive-variance cutoffs used for the manuscript's
+    # low/medium/high uncertainty strata.  These are boundary values, not the
+    # mean SD within the retained validation subset.
+    uncertainty_low_var: float
+    uncertainty_high_var: float
 
     max_seq_len: int = 1800
     d_seqfeat: int = 45
@@ -55,24 +58,24 @@ TARGET_CONFIGS: dict[str, PredictorConfig] = {
         checkpoint_name="topt_best_model.pt",
         result_filename="topt_result.csv",
         legacy_result_filename="topt_relust.csv",
-        uncertainty_low_sd=4.338927222,
-        uncertainty_high_sd=5.140176075,
+        uncertainty_low_var=23.990439051923204,
+        uncertainty_high_var=46.35023514649311,
     ),
     "phopt": PredictorConfig(
         target="phopt",
         checkpoint_name="phopt_best_model.pt",
         result_filename="phopt_result.csv",
         legacy_result_filename="phopt_relust.csv",
-        uncertainty_low_sd=0.359165809,
-        uncertainty_high_sd=0.428786247,
+        uncertainty_low_var=0.1649516117220315,
+        uncertainty_high_var=0.3123931943538451,
     ),
     "pi": PredictorConfig(
         target="pi",
         checkpoint_name="pi_best_model.pt",
         result_filename="pi_result.csv",
         legacy_result_filename="pi_relust.csv",
-        uncertainty_low_sd=0.539304525,
-        uncertainty_high_sd=0.628773868,
+        uncertainty_low_var=0.3233168718658277,
+        uncertainty_high_var=0.6871182591257963,
     ),
 }
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import gc
 import json
 import math
 import random
@@ -101,6 +102,37 @@ def set_grad_checkpointing(model: torch.nn.Module, enabled: bool):
             module.gradient_checkpointing_disable()
 
 
+class EMA:
+    """Exponential moving average matching the original training notebooks."""
+
+    def __init__(self, model: torch.nn.Module, decay: float = 0.999):
+        self.decay = float(decay)
+        self.shadow = {name: param.detach().clone() for name, param in model.named_parameters()}
+        self.backup: dict[str, torch.Tensor] = {}
+
+    @torch.no_grad()
+    def update(self, model: torch.nn.Module):
+        for name, param in model.named_parameters():
+            if name in self.shadow:
+                self.shadow[name].mul_(self.decay).add_(param.detach(), alpha=1.0 - self.decay)
+
+    @torch.no_grad()
+    def apply_shadow(self, model: torch.nn.Module):
+        if self.backup:
+            raise RuntimeError("EMA shadow weights are already applied.")
+        for name, param in model.named_parameters():
+            if name in self.shadow:
+                self.backup[name] = param.detach().clone()
+                param.copy_(self.shadow[name])
+
+    @torch.no_grad()
+    def restore(self, model: torch.nn.Module):
+        for name, param in model.named_parameters():
+            if name in self.backup:
+                param.copy_(self.backup[name])
+        self.backup = {}
+
+
 def build_optimizer_and_scheduler(
     model: torch.nn.Module,
     *,
@@ -109,6 +141,7 @@ def build_optimizer_and_scheduler(
     lr_head: float,
     lr_backbone: float | None,
     weight_decay: float,
+    warmup_steps: int,
     warmup_ratio: float,
     lr_min_factor: float,
 ):
@@ -138,7 +171,16 @@ def build_optimizer_and_scheduler(
         raise RuntimeError("No trainable parameters found.")
     optimizer = torch.optim.AdamW(list(groups.values()))
     total_steps = max(1, int(epochs) * max(1, int(updates_per_epoch)))
-    warmup_steps = int(round(total_steps * max(0.0, float(warmup_ratio))))
+    warmup_by_ratio = int(round(total_steps * max(0.0, float(warmup_ratio))))
+    warmup_steps = max(0, int(warmup_steps))
+    if warmup_steps > 0 and warmup_by_ratio > 0:
+        warmup_steps = min(warmup_steps, warmup_by_ratio)
+    elif warmup_steps <= 0:
+        warmup_steps = warmup_by_ratio
+    if total_steps > 1:
+        warmup_steps = min(warmup_steps, total_steps - 1)
+    else:
+        warmup_steps = 0
 
     def lr_lambda(step: int):
         if warmup_steps and step < warmup_steps:
@@ -166,6 +208,7 @@ def run_epoch(
     target_noise: float = 0.0,
     y_std: float | None = None,
     use_amp: bool = False,
+    ema: EMA | None = None,
 ) -> dict[str, float]:
     device = next(model.parameters()).device
     alpha = min(max(float(loss_alpha), 0.0), 1.0)
@@ -222,6 +265,8 @@ def run_epoch(
                             torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip))
                         amp_scaler.step(optimizer)
                         amp_scaler.update()
+                        if ema is not None:
+                            ema.update(model)
                         if scheduler:
                             scheduler.step()
                 else:
@@ -231,6 +276,8 @@ def run_epoch(
                         if grad_clip:
                             torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip))
                         optimizer.step()
+                        if ema is not None:
+                            ema.update(model)
                         if scheduler:
                             scheduler.step()
 
@@ -295,10 +342,299 @@ def write_predictions_csv(model, loader, scaler: ZScoreTarget, config: Predictor
         loader,
         device,
         z=config.interval_z,
-        uncertainty_low_sd=config.uncertainty_low_sd,
-        uncertainty_high_sd=config.uncertainty_high_sd,
+        uncertainty_low_var=config.uncertainty_low_var,
+        uncertainty_high_var=config.uncertainty_high_var,
     )
     pd.DataFrame(rows).to_csv(out_path, index=False, encoding="utf-8-sig")
+
+
+def _load_checkpoint(path: str | Path, device: torch.device) -> dict[str, Any]:
+    try:
+        return torch.load(path, map_location=device, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=device)
+
+
+def _score_metrics(metrics: dict[str, float], early_metric: str) -> float:
+    if early_metric in {"rmse", "mae", "loss"}:
+        return float(metrics[early_metric])
+    if early_metric in {"r2", "pearson", "ccc"}:
+        return -float(metrics[early_metric])
+    raise ValueError(f"Unsupported early_metric: {early_metric}")
+
+
+def _fit_two_stage(
+    model: torch.nn.Module,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    scaler: ZScoreTarget,
+    *,
+    raw: dict[str, Any],
+    pred_config: PredictorConfig,
+    device: torch.device,
+    use_amp: bool,
+    ckpt_path: Path,
+    log_path: Path,
+    run_tag: str,
+) -> dict[str, Any]:
+    """Train and select checkpoints using validation data only.
+
+    Deliberately no test loader is accepted here.  This makes it impossible for
+    CV folds or final epoch selection to inspect test metrics during training.
+    """
+
+    epochs = int(raw.get("epochs", 20))
+    freeze_epochs = int(raw.get("freeze_epochs", 0))
+    patience = int(raw.get("patience", 8))
+    accum_steps = int(raw.get("accum_steps", 1))
+    grad_clip = raw.get("grad_clip", 1.0)
+    target_noise = float(raw.get("target_noise", 0.0))
+    warmup_steps = int(raw.get("warmup_steps", 0))
+    warmup_ratio = float(raw.get("warmup_ratio", 0.0))
+    lr_min_factor = float(raw.get("lr_min_factor", 0.1))
+    weight_decay = float(raw.get("weight_decay", 1e-4))
+    alpha_a = float(raw.get("loss_alpha_A", 0.0))
+    alpha_b = float(raw.get("loss_alpha_B", 0.2))
+    lr_head_a = float(raw.get("lr_head_A", raw.get("lr_head", 1e-4)))
+    lr_head_b = float(raw.get("lr_head_B", raw.get("lr_head", 1e-4)))
+    lr_backbone_b = raw.get("lr_backbone_B", raw.get("lr_backbone", 1e-5))
+    lr_backbone_b = None if lr_backbone_b is None else float(lr_backbone_b)
+    early_metric = str(raw.get("early_metric", "rmse")).lower()
+    use_ema = bool(raw.get("use_ema", True))
+    ema_decay = float(raw.get("ema_decay", 0.999))
+    y_std = float(scaler.std.cpu()) if scaler.std is not None else None
+
+    ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    scaler_amp = torch.amp.GradScaler("cuda", enabled=use_amp)
+    ema = EMA(model, ema_decay) if use_ema else None
+    best_score = float("inf")
+    best_epoch = -1
+    best_phase: str | None = None
+
+    def save_best(epoch: int, phase: str, alpha: float, score: float):
+        if ema is not None:
+            ema.apply_shadow(model)
+        try:
+            torch.save({
+                "model": model.state_dict(),
+                "scaler": scaler.state_dict(),
+                "config": {"train": raw, "predictor": asdict(pred_config)},
+                "ema": use_ema,
+                "ema_decay": ema_decay,
+                "best_epoch": epoch,
+                "best_phase": phase,
+                "best_alpha": alpha,
+                "best_score": score,
+                "early_metric": early_metric,
+            }, ckpt_path)
+        finally:
+            if ema is not None:
+                ema.restore(model)
+
+    def run_phase(
+        phase: str,
+        start_epoch: int,
+        end_epoch: int,
+        alpha: float,
+        freeze: bool,
+        lr_head: float,
+        lr_backbone: float | None,
+    ):
+        nonlocal best_score, best_epoch, best_phase
+        if end_epoch < start_epoch:
+            return
+        bad = 0
+        set_backbone_trainable(model, trainable=not freeze)
+        set_grad_checkpointing(model, enabled=bool(raw.get("grad_ckpt", False)) and not freeze)
+        updates = max(1, math.ceil(len(train_loader) / max(1, accum_steps)))
+        optimizer, scheduler = build_optimizer_and_scheduler(
+            model,
+            updates_per_epoch=updates,
+            epochs=end_epoch - start_epoch + 1,
+            lr_head=lr_head,
+            lr_backbone=lr_backbone,
+            weight_decay=weight_decay,
+            warmup_steps=warmup_steps,
+            warmup_ratio=warmup_ratio,
+            lr_min_factor=lr_min_factor,
+        )
+        for epoch in range(start_epoch, end_epoch + 1):
+            started = time.time()
+            train_metrics = run_epoch(
+                model,
+                train_loader,
+                scaler,
+                is_train=True,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                amp_scaler=scaler_amp,
+                accum_steps=accum_steps,
+                loss_alpha=alpha,
+                grad_clip=grad_clip,
+                target_noise=target_noise,
+                y_std=y_std,
+                use_amp=use_amp,
+                ema=ema,
+            )
+            if ema is not None:
+                ema.apply_shadow(model)
+            try:
+                val_metrics = run_epoch(
+                    model, val_loader, scaler, is_train=False, loss_alpha=alpha, use_amp=False
+                )
+            finally:
+                if ema is not None:
+                    ema.restore(model)
+
+            row = {
+                "run": run_tag,
+                "phase": phase,
+                "epoch": epoch,
+                "alpha": alpha,
+                "seconds": round(time.time() - started, 3),
+                **{f"train_{key}": value for key, value in train_metrics.items()},
+                **{f"val_{key}": value for key, value in val_metrics.items()},
+            }
+            append_log_csv(log_path, row)
+            print(
+                f"[{run_tag} {phase}:{epoch:03d}] train_rmse={train_metrics['rmse']:.4f} "
+                f"val_rmse={val_metrics['rmse']:.4f} val_mae={val_metrics['mae']:.4f} "
+                f"val_r2={val_metrics['r2']:.4f} val_ccc={val_metrics['ccc']:.4f}"
+            )
+
+            current_score = _score_metrics(val_metrics, early_metric)
+            if current_score < best_score - 1e-12:
+                best_score = current_score
+                best_epoch = epoch
+                best_phase = phase
+                bad = 0
+                save_best(epoch, phase, alpha, current_score)
+                print(f"[Saved] best -> {ckpt_path}")
+            else:
+                bad += 1
+                if bad >= patience:
+                    print(
+                        f"[EarlyStop] run={run_tag} best_epoch={best_epoch} "
+                        f"phase={best_phase} score={best_score:.6f}"
+                    )
+                    break
+
+    if freeze_epochs > 0:
+        run_phase("A", 1, min(freeze_epochs, epochs), alpha_a, True, lr_head_a, None)
+    if epochs > freeze_epochs:
+        run_phase("B", freeze_epochs + 1, epochs, alpha_b, False, lr_head_b, lr_backbone_b)
+
+    if not ckpt_path.exists():
+        raise RuntimeError(f"Training finished without saving a checkpoint: {ckpt_path}")
+    state = _load_checkpoint(ckpt_path, device)
+    model.load_state_dict(state["model"])
+    return {
+        "best_epoch": int(state.get("best_epoch", best_epoch)),
+        "best_phase": state.get("best_phase", best_phase),
+        "best_alpha": float(state.get("best_alpha", alpha_b)),
+        "best_score": float(state.get("best_score", best_score)),
+        "early_metric": state.get("early_metric", early_metric),
+    }
+
+
+def _kfold_indices(n_items: int, n_splits: int, seed: int):
+    if n_splits < 2 or n_splits > n_items:
+        raise ValueError(f"cv_folds must be between 2 and the training sample count ({n_items}).")
+    indices = np.arange(n_items)
+    np.random.RandomState(seed).shuffle(indices)
+    fold_sizes = np.full(n_splits, n_items // n_splits, dtype=int)
+    fold_sizes[: n_items % n_splits] += 1
+    current = 0
+    for fold_size in fold_sizes:
+        start, stop = current, current + int(fold_size)
+        val_indices = indices[start:stop]
+        train_indices = np.concatenate([indices[:start], indices[stop:]])
+        yield train_indices, val_indices
+        current = stop
+
+
+def _run_cross_validation(
+    train_items: list[dict],
+    *,
+    target: str,
+    pred_config: PredictorConfig,
+    raw: dict[str, Any],
+    device: torch.device,
+    use_amp: bool,
+    out_dir: Path,
+) -> list[dict[str, Any]]:
+    """Run CV on the training split only; the test split is never accepted or read."""
+
+    n_splits = int(raw.get("cv_folds", 5))
+    split_seed = int(raw.get("split_seed", raw.get("seed", 42)))
+    cv_root = out_dir / "cv"
+    cv_root.mkdir(parents=True, exist_ok=True)
+    summaries: list[dict[str, Any]] = []
+
+    for fold, (train_indices, val_indices) in enumerate(
+        _kfold_indices(len(train_items), n_splits, split_seed), start=1
+    ):
+        print(f"[CV] fold={fold}/{n_splits} train={len(train_indices)} val={len(val_indices)}")
+        set_seed(split_seed + fold - 1)
+        fold_train_items = [train_items[int(index)] for index in train_indices]
+        fold_val_items = [train_items[int(index)] for index in val_indices]
+        fold_train_loader = make_loader(fold_train_items, pred_config, shuffle=True)
+        fold_val_loader = make_loader(fold_val_items, pred_config, shuffle=False)
+
+        fold_scaler = ZScoreTarget()
+        fold_targets = torch.tensor(
+            [float(item[target]) for item in fold_train_items], dtype=torch.float32, device=device
+        )
+        fold_scaler.fit(fold_targets)
+        fold_model = build_model(pred_config, device=device).to(device)
+        fold_dir = cv_root / f"fold_{fold}"
+        fold_result = _fit_two_stage(
+            fold_model,
+            fold_train_loader,
+            fold_val_loader,
+            fold_scaler,
+            raw=raw,
+            pred_config=pred_config,
+            device=device,
+            use_amp=use_amp,
+            ckpt_path=fold_dir / "best.pt",
+            log_path=fold_dir / "train_log.csv",
+            run_tag=f"CV{fold}",
+        )
+        fold_val_metrics = run_epoch(
+            fold_model,
+            fold_val_loader,
+            fold_scaler,
+            is_train=False,
+            loss_alpha=fold_result["best_alpha"],
+            use_amp=False,
+        )
+        write_predictions_csv(
+            fold_model,
+            fold_val_loader,
+            fold_scaler,
+            pred_config,
+            device,
+            fold_dir / "val_predictions.csv",
+        )
+        with open(fold_dir / "split_indices.json", "w", encoding="utf-8") as handle:
+            json.dump(
+                {"train_indices": train_indices.tolist(), "val_indices": val_indices.tolist()},
+                handle,
+                ensure_ascii=False,
+                indent=2,
+            )
+        summaries.append({"fold": fold, **fold_result, "val": fold_val_metrics})
+
+        del fold_model, fold_train_loader, fold_val_loader, fold_scaler, fold_targets
+        gc.collect()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+    with open(cv_root / "metrics.json", "w", encoding="utf-8") as handle:
+        json.dump(summaries, handle, ensure_ascii=False, indent=2)
+    return summaries
 
 
 def train_from_config(config_path: str | Path) -> dict[str, Any]:
@@ -315,7 +651,6 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
     target = normalize_target(str(raw["target"]))
     out_dir = Path(resolve_path(raw.get("out_dir", Path("runs") / target)))
     out_dir.mkdir(parents=True, exist_ok=True)
-
     hf_cache = resolve_path(raw.get("hf_cache")) or str(default_hf_cache_dir())
     model_overrides = {
         "batch_size": raw.get("batch_size"),
@@ -352,137 +687,102 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
     test_table = resolve_path(raw.get("test_table"))
     pdb_dir = resolve_path(raw["pdb_dir"])
     sasa_dir = out_dir / "sasa_three"
-    prepare_sasa_for_tables([train_table, val_table, test_table], pdb_dir, sasa_dir, pred_config)
 
-    train_items = filter_labeled(build_dataset_from_table(train_table, pdb_dir, sasa_dir, pred_config), target)
-    val_items = filter_labeled(build_dataset_from_table(val_table, pdb_dir, sasa_dir, pred_config), target)
-    test_items = filter_labeled(build_dataset_from_table(test_table, pdb_dir, sasa_dir, pred_config), target) if test_table else []
-    print(f"[Count] train={len(train_items)} val={len(val_items)} test={len(test_items)}")
+    # Test data is intentionally excluded from preparation, loading, CV and
+    # checkpoint selection.  It is loaded exactly once after the best final
+    # checkpoint has been selected on validation data.
+    prepare_sasa_for_tables([train_table, val_table], pdb_dir, sasa_dir, pred_config)
+    train_items = filter_labeled(
+        build_dataset_from_table(train_table, pdb_dir, sasa_dir, pred_config), target
+    )
+    val_items = filter_labeled(
+        build_dataset_from_table(val_table, pdb_dir, sasa_dir, pred_config), target
+    )
+    print(f"[Count] train={len(train_items)} val={len(val_items)} test=deferred")
     if not train_items or not val_items:
         raise RuntimeError("Training and validation sets must both contain labeled samples.")
 
-    y_train = torch.tensor([float(item[target]) for item in train_items], dtype=torch.float32, device=device)
+    cv_metrics: list[dict[str, Any]] = []
+    if bool(raw.get("run_cv", False)):
+        cv_metrics = _run_cross_validation(
+            train_items,
+            target=target,
+            pred_config=pred_config,
+            raw=raw,
+            device=device,
+            use_amp=use_amp,
+            out_dir=out_dir,
+        )
+
+    set_seed(seed)
+    y_train = torch.tensor(
+        [float(item[target]) for item in train_items], dtype=torch.float32, device=device
+    )
     scaler = ZScoreTarget()
     scaler.fit(y_train)
-    y_std = float(scaler.std.cpu()) if scaler.std is not None else None
     print(f"[Scaler] mu={float(scaler.mu):.4f} std={float(scaler.std):.4f}")
-
     train_loader = make_loader(train_items, pred_config, shuffle=True)
     val_loader = make_loader(val_items, pred_config, shuffle=False)
-    test_loader = make_loader(test_items, pred_config, shuffle=False) if test_items else None
-
     model = build_model(pred_config, device=device).to(device)
-    epochs = int(raw.get("epochs", 20))
-    freeze_epochs = int(raw.get("freeze_epochs", 0))
-    patience = int(raw.get("patience", 8))
-    accum_steps = int(raw.get("accum_steps", 1))
-    grad_clip = raw.get("grad_clip", 1.0)
-    target_noise = float(raw.get("target_noise", 0.0))
-    warmup_ratio = float(raw.get("warmup_ratio", 0.02))
-    lr_min_factor = float(raw.get("lr_min_factor", 0.1))
-    weight_decay = float(raw.get("weight_decay", 1e-4))
-    alpha_a = float(raw.get("loss_alpha_A", 0.0))
-    alpha_b = float(raw.get("loss_alpha_B", 0.2))
-    lr_head_a = float(raw.get("lr_head_A", raw.get("lr_head", 1e-4)))
-    lr_head_b = float(raw.get("lr_head_B", raw.get("lr_head", 1e-4)))
-    lr_backbone_b = raw.get("lr_backbone_B", raw.get("lr_backbone", 1e-5))
-    lr_backbone_b = None if lr_backbone_b is None else float(lr_backbone_b)
-    early_metric = str(raw.get("early_metric", "rmse"))
     ckpt_path = out_dir / pred_config.checkpoint_name
-    log_path = out_dir / "train_log.csv"
+    best = _fit_two_stage(
+        model,
+        train_loader,
+        val_loader,
+        scaler,
+        raw=raw,
+        pred_config=pred_config,
+        device=device,
+        use_amp=use_amp,
+        ckpt_path=ckpt_path,
+        log_path=out_dir / "train_log.csv",
+        run_tag="FINAL",
+    )
 
-    def score(metrics: dict[str, float]) -> float:
-        if early_metric in {"rmse", "mae", "loss"}:
-            return float(metrics[early_metric])
-        if early_metric in {"r2", "pearson", "ccc"}:
-            return -float(metrics[early_metric])
-        raise ValueError(f"Unsupported early_metric: {early_metric}")
+    val_metrics = run_epoch(
+        model,
+        val_loader,
+        scaler,
+        is_train=False,
+        loss_alpha=best["best_alpha"],
+        use_amp=False,
+    )
+    metrics: dict[str, Any] = {**best, "val": val_metrics}
+    if cv_metrics:
+        metrics["cv"] = cv_metrics
+    write_predictions_csv(
+        model, val_loader, scaler, pred_config, device, out_dir / "val_predictions.csv"
+    )
 
-    best_score = float("inf")
-    best_epoch = -1
-    best_phase = None
-    bad = 0
-    scaler_amp = torch.amp.GradScaler("cuda", enabled=use_amp)
-
-    def run_phase(phase: str, start_ep: int, end_ep: int, alpha: float, freeze: bool, lr_head: float, lr_backbone: float | None):
-        nonlocal best_score, best_epoch, best_phase, bad
-        if end_ep < start_ep:
-            return
-        bad = 0
-        set_backbone_trainable(model, trainable=not freeze)
-        set_grad_checkpointing(model, enabled=bool(raw.get("grad_ckpt", False)) and (not freeze))
-        updates = max(1, math.ceil(len(train_loader) / max(1, accum_steps)))
-        opt, sched = build_optimizer_and_scheduler(
-            model,
-            updates_per_epoch=updates,
-            epochs=end_ep - start_ep + 1,
-            lr_head=lr_head,
-            lr_backbone=lr_backbone,
-            weight_decay=weight_decay,
-            warmup_ratio=warmup_ratio,
-            lr_min_factor=lr_min_factor,
+    if test_table:
+        prepare_sasa_for_tables([test_table], pdb_dir, sasa_dir, pred_config)
+        test_items = filter_labeled(
+            build_dataset_from_table(test_table, pdb_dir, sasa_dir, pred_config), target
         )
-        for epoch in range(start_ep, end_ep + 1):
-            t0 = time.time()
-            tr = run_epoch(
-                model, train_loader, scaler, is_train=True, optimizer=opt, scheduler=sched,
-                amp_scaler=scaler_amp, accum_steps=accum_steps, loss_alpha=alpha,
-                grad_clip=grad_clip, target_noise=target_noise, y_std=y_std, use_amp=use_amp,
+        print(f"[Final test] n={len(test_items)}")
+        if test_items:
+            test_loader = make_loader(test_items, pred_config, shuffle=False)
+            test_metrics = run_epoch(
+                model,
+                test_loader,
+                scaler,
+                is_train=False,
+                loss_alpha=best["best_alpha"],
+                use_amp=False,
             )
-            va = run_epoch(model, val_loader, scaler, is_train=False, loss_alpha=alpha, use_amp=False)
-            row = {
-                "phase": phase, "epoch": epoch, "alpha": alpha, "seconds": round(time.time() - t0, 3),
-                **{f"train_{k}": v for k, v in tr.items()},
-                **{f"val_{k}": v for k, v in va.items()},
-            }
-            append_log_csv(log_path, row)
-            print(
-                f"[{phase}:{epoch:03d}] train_rmse={tr['rmse']:.4f} val_rmse={va['rmse']:.4f} "
-                f"val_mae={va['mae']:.4f} val_r2={va['r2']:.4f} val_ccc={va['ccc']:.4f}"
+            metrics["test"] = test_metrics
+            write_predictions_csv(
+                model,
+                test_loader,
+                scaler,
+                pred_config,
+                device,
+                out_dir / "test_predictions.csv",
             )
-            cur = score(va)
-            if cur < best_score - 1e-12:
-                best_score = cur
-                best_epoch = epoch
-                best_phase = phase
-                bad = 0
-                torch.save({
-                    "model": model.state_dict(),
-                    "scaler": scaler.state_dict(),
-                    "config": {"train": raw, "predictor": asdict(pred_config)},
-                    "best_epoch": best_epoch,
-                    "best_phase": best_phase,
-                    "best_alpha": alpha,
-                    "best_score": best_score,
-                    "early_metric": early_metric,
-                }, ckpt_path)
-                print(f"[Saved] best -> {ckpt_path}")
-            else:
-                bad += 1
-                if bad >= patience:
-                    print(f"[EarlyStop] best_epoch={best_epoch} phase={best_phase} score={best_score:.6f}")
-                    return
 
-    if freeze_epochs > 0:
-        run_phase("A", 1, min(freeze_epochs, epochs), alpha_a, True, lr_head_a, None)
-    if epochs > freeze_epochs:
-        run_phase("B", freeze_epochs + 1, epochs, alpha_b, False, lr_head_b, lr_backbone_b)
-
-    if not ckpt_path.exists():
-        raise RuntimeError("Training finished without saving a checkpoint.")
-    state = torch.load(ckpt_path, map_location=device, weights_only=False)
-    model.load_state_dict(state["model"])
-    best_alpha = float(state.get("best_alpha", alpha_b))
-    val_metrics = run_epoch(model, val_loader, scaler, is_train=False, loss_alpha=best_alpha, use_amp=False)
-    metrics = {"best_epoch": best_epoch, "best_phase": best_phase, "best_score": best_score, "val": val_metrics}
-    write_predictions_csv(model, val_loader, scaler, pred_config, device, out_dir / "val_predictions.csv")
-    if test_loader is not None:
-        test_metrics = run_epoch(model, test_loader, scaler, is_train=False, loss_alpha=best_alpha, use_amp=False)
-        metrics["test"] = test_metrics
-        write_predictions_csv(model, test_loader, scaler, pred_config, device, out_dir / "test_predictions.csv")
-    with open(out_dir / "metrics.json", "w", encoding="utf-8") as fh:
-        json.dump(metrics, fh, ensure_ascii=False, indent=2)
-    with open(out_dir / "train_config_resolved.json", "w", encoding="utf-8") as fh:
-        json.dump({"train": raw, "predictor": asdict(pred_config)}, fh, ensure_ascii=False, indent=2)
+    with open(out_dir / "metrics.json", "w", encoding="utf-8") as handle:
+        json.dump(metrics, handle, ensure_ascii=False, indent=2)
+    with open(out_dir / "train_config_resolved.json", "w", encoding="utf-8") as handle:
+        json.dump({"train": raw, "predictor": asdict(pred_config)}, handle, ensure_ascii=False, indent=2)
     print(f"[Done] best checkpoint: {ckpt_path}")
     return {"checkpoint": str(ckpt_path), "metrics": metrics}

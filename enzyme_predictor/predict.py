@@ -25,17 +25,35 @@ def resolve_device(device: str | None = None) -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def uncertainty_label_from_variance(pred_var: float, low_var: float, high_var: float) -> str:
+    """Assign the manuscript uncertainty stratum from predictive variance."""
+    if low_var > high_var:
+        raise ValueError("low_var must not exceed high_var")
+    if pred_var <= low_var:
+        return "low"
+    if pred_var <= high_var:
+        return "medium"
+    return "high"
+
+
 def load_checkpointed_model(
     config: PredictorConfig,
     checkpoint_path: str | Path,
     device: torch.device,
     strict_load: bool = True,
-) -> tuple[torch.nn.Module, ZScoreTarget, dict]:
-    model = build_model(config, device=device)
+) -> tuple[torch.nn.Module, ZScoreTarget]:
+    # Prediction checkpoints contain the complete ESM2 and ProtBert state.
+    # Build the architecture from the cached configs and load the checkpoint
+    # once, instead of first loading another multi-gigabyte copy of the base
+    # model weights.
+    model = build_model(config, device=device, load_pretrained_backbones=False)
     try:
-        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        # Keep the checkpoint on CPU while copying it into the model. Loading a
+        # second 4 GB state dict directly onto the GPU needlessly doubles peak
+        # GPU memory during startup.
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     except TypeError:
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
     model_state = checkpoint.get("model", checkpoint)
     model_state = normalize_state_dict_keys(model_state)
     missing, unexpected = model.load_state_dict(model_state, strict=strict_load)
@@ -46,8 +64,10 @@ def load_checkpointed_model(
         raise KeyError("Checkpoint does not contain a 'scaler' entry; cannot inverse-transform predictions.")
     scaler = ZScoreTarget()
     scaler.load_state_dict(scaler_state)
+    del model_state
+    del checkpoint
     model.eval()
-    return model, scaler, checkpoint
+    return model, scaler
 
 
 def collect_predictions(
@@ -56,8 +76,8 @@ def collect_predictions(
     loader: DataLoader,
     device: torch.device,
     z: float,
-    uncertainty_low_sd: float,
-    uncertainty_high_sd: float,
+    uncertainty_low_var: float,
+    uncertainty_high_var: float,
 ) -> list[dict]:
     rows: list[dict] = []
     with torch.no_grad():
@@ -83,17 +103,15 @@ def collect_predictions(
             for i, pid in enumerate(ids):
                 pred_mu = float(mu[i].cpu())
                 pred_sd = float(sd[i].cpu())
-                if pred_sd < uncertainty_low_sd:
-                    uncertainty = "low"
-                elif pred_sd <= uncertainty_high_sd:
-                    uncertainty = "medium"
-                else:
-                    uncertainty = "high"
+                pred_var = pred_sd * pred_sd
+                uncertainty = uncertainty_label_from_variance(
+                    pred_var, uncertainty_low_var, uncertainty_high_var
+                )
                 rows.append({
                     "id": pid,
                     "pred_mu": pred_mu,
                     "pred_sd": pred_sd,
-                    "pred_var": pred_sd * pred_sd,
+                    "pred_var": pred_var,
                     "lower95": pred_mu - z * pred_sd,
                     "upper95": pred_mu + z * pred_sd,
                     "uncertainty": uncertainty,
@@ -208,15 +226,15 @@ def predict_target(
             collate_fn=collate_fn,
         )
 
-        model, scaler, checkpoint = load_checkpointed_model(config, checkpoint_path, device, strict_load=strict_load)
+        model, scaler = load_checkpointed_model(config, checkpoint_path, device, strict_load=strict_load)
         rows = collect_predictions(
             model,
             scaler,
             loader,
             device,
             z=config.interval_z,
-            uncertainty_low_sd=config.uncertainty_low_sd,
-            uncertainty_high_sd=config.uncertainty_high_sd,
+            uncertainty_low_var=config.uncertainty_low_var,
+            uncertainty_high_var=config.uncertainty_high_var,
         )
         result_df = pd.DataFrame(rows, columns=["id", "pred_mu", "pred_var", "lower95", "upper95", "uncertainty"])
 

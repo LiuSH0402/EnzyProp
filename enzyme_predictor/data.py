@@ -238,8 +238,12 @@ def make_graph_from_coords(coords: torch.Tensor, seq_len: int, k: int = 20) -> D
     kk = min(max(1, int(k)), n - 1)
     dist_matrix = torch.cdist(coords, coords)
     dist_matrix.fill_diagonal_(math.inf)
-    dst = torch.topk(dist_matrix, k=kk, largest=False).indices.reshape(-1)
-    src = torch.arange(n, dtype=torch.long).repeat_interleave(kk)
+    # Match torch_geometric.nn.knn_graph(..., flow="source_to_target") used by
+    # the original training notebooks: messages travel neighbor -> center.
+    neighbor = torch.topk(dist_matrix, k=kk, largest=False).indices.reshape(-1)
+    center = torch.arange(n, dtype=torch.long).repeat_interleave(kk)
+    src = neighbor
+    dst = center
     edge_index = torch.stack([src, dst], dim=0)
 
     dist = (coords[src] - coords[dst]).norm(dim=1)
