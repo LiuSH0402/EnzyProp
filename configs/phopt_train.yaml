@@ -1,4 +1,6 @@
-# Example EnzyProp training config for optimal pH.
+# Paper-aligned EnzyProp training config for optimal pH.
+# CV uses the training split only; the test split is loaded once after final
+# checkpoint selection.
 
 target: phopt
 train_table: ../data/phopt_train.csv
@@ -23,20 +25,27 @@ gnn_k_neighbors: 20
 
 device: cuda
 epochs: 30
-freeze_epochs: 0
+freeze_epochs: 5
 patience: 7
 early_metric: rmse
 seed: 42
+split_seed: 42
+run_cv: true
+cv_folds: 5
 use_amp: true
 grad_ckpt: true
-accum_steps: 1
+accum_steps: 4
 grad_clip: 1.0
 target_noise: 0.0
+use_ema: true
+ema_decay: 0.999
 
 loss_alpha_A: 0.0
 loss_alpha_B: 0.1
-lr_head: 1.0e-4
-lr_backbone: 1.0e-5
+lr_head_A: 3.0e-4
+lr_backbone_B: 5.0e-6
+lr_head_B: 1.0e-4
 weight_decay: 1.0e-4
+warmup_steps: 400
 warmup_ratio: 0.02
-lr_min_factor: 0.1
+lr_min_factor: 0.01
